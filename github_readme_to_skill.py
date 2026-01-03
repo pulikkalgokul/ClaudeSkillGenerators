@@ -28,19 +28,114 @@ Section splitting:
 - Preserves code blocks and examples
 
 Usage:
-    python github_readme_to_skill.py <input_readme> <output_dir> [options]
+    python github_readme_to_skill.py <input_source> <output_dir> [options]
 
 Example:
+    # From local file
     python github_readme_to_skill.py README.md ./swift-mocking-skill --skill-name "swift-mocking"
-    python github_readme_to_skill.py path/to/README.md ./output --skill-name "my-library"
+    
+    # From GitHub direct file link
+    python3 github_readme_to_skill.py https://github.com/owner/repo/blob/main/README.md ./output
+    
+    # From raw GitHub URL
+    python github_readme_to_skill.py https://raw.githubusercontent.com/owner/repo/main/README.md ./output
 """
 
 import argparse
 import os
 import re
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
+
+
+def is_url(source: str) -> bool:
+    """Check if the source is a URL."""
+    return source.startswith("http://") or source.startswith("https://")
+
+
+def parse_github_file_url(url: str) -> Optional[dict]:
+    """
+    Parse a GitHub direct file URL to extract owner, repo, branch, and file path.
+    
+    Supports:
+    - https://github.com/owner/repo/blob/branch/path/to/file.md
+    - https://raw.githubusercontent.com/owner/repo/branch/path/to/file.md
+    """
+    # Raw GitHub URL
+    raw_match = re.match(
+        r"https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)",
+        url
+    )
+    if raw_match:
+        return {
+            "owner": raw_match.group(1),
+            "repo": raw_match.group(2),
+            "branch": raw_match.group(3),
+            "path": raw_match.group(4),
+            "is_raw": True,
+        }
+    
+    # Standard GitHub URL with file path
+    blob_match = re.match(
+        r"https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)",
+        url
+    )
+    if blob_match:
+        return {
+            "owner": blob_match.group(1),
+            "repo": blob_match.group(2),
+            "branch": blob_match.group(3),
+            "path": blob_match.group(4),
+            "is_raw": False,
+        }
+    
+    return None
+
+
+def fetch_readme_from_url(url: str) -> tuple[Optional[str], str]:
+    """
+    Fetch README content from a direct GitHub file URL.
+    
+    Returns:
+        Tuple of (content, repo_name) or (None, "") if not found
+    """
+    parsed = parse_github_file_url(url)
+    if not parsed:
+        print(f"Error: Invalid GitHub file URL. Expected format:")
+        print(f"  https://github.com/owner/repo/blob/branch/path/to/file.md")
+        print(f"  https://raw.githubusercontent.com/owner/repo/branch/path/to/file.md")
+        return None, ""
+    
+    owner = parsed["owner"]
+    repo = parsed["repo"]
+    branch = parsed["branch"]
+    path = parsed["path"]
+    
+    # Convert to raw URL if needed
+    if parsed["is_raw"]:
+        raw_url = url
+    else:
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    
+    print(f"Fetching: {owner}/{repo}/{path}")
+    
+    try:
+        req = urllib.request.Request(
+            raw_url,
+            headers={"User-Agent": "github-readme-to-skill/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=30) as response:
+            content = response.read().decode("utf-8")
+            return content, repo
+    except urllib.error.HTTPError as e:
+        print(f"Error: HTTP {e.code} - Could not fetch {path}")
+        return None, repo
+    except urllib.error.URLError as e:
+        print(f"Error: {e.reason}")
+        return None, repo
 
 
 @dataclass
@@ -281,7 +376,7 @@ def generate_section_filename(section: Section) -> str:
 
 
 def process_readme(
-    input_file: Path,
+    content: str,
     output_dir: Path,
     skill_name: str,
     skill_description: Optional[str] = None,
@@ -289,15 +384,11 @@ def process_readme(
     keep_badges: bool = False,
     single_file: bool = False,
 ) -> None:
-    """Process a README file and generate skill files."""
+    """Process README content and generate skill files."""
     print(f"GitHub README to SKILL Converter")
     print(f"=" * 50)
-    print(f"Input:  {input_file}")
     print(f"Output: {output_dir}")
     print()
-    
-    with open(input_file, "r", encoding="utf-8") as f:
-        content = f.read()
     
     if not keep_badges:
         content = remove_badges(content)
@@ -487,9 +578,9 @@ def main():
         epilog=__doc__
     )
     parser.add_argument(
-        "input_file",
-        type=Path,
-        help="Path to the README.md file"
+        "input_source",
+        type=str,
+        help="Path to README.md file or GitHub URL (e.g., https://github.com/owner/repo/blob/main/README.md)"
     )
     parser.add_argument(
         "output_dir",
@@ -532,30 +623,38 @@ def main():
     
     args = parser.parse_args()
     
-    input_file = args.input_file.resolve()
+    input_source = args.input_source
     output_dir = args.output_dir.resolve()
     
-    if not input_file.exists():
-        print(f"Error: Input file does not exist: {input_file}")
-        return 1
-    
-    skill_name = args.skill_name
-    if not skill_name:
+    # Determine if input is URL or local file
+    if is_url(input_source):
+        content, repo_name = fetch_readme_from_url(input_source)
+        if content is None:
+            return 1
+        source_name = repo_name
+    else:
+        input_file = Path(input_source).resolve()
+        if not input_file.exists():
+            print(f"Error: Input file does not exist: {input_file}")
+            return 1
+        
         with open(input_file, "r", encoding="utf-8") as f:
             content = f.read()
+        source_name = input_file.stem
+    
+    # Determine skill name
+    skill_name = args.skill_name
+    if not skill_name:
         title, _ = extract_title_and_description(content)
-        skill_name = slugify(title) if title else input_file.stem
+        skill_name = slugify(title) if title else source_name
     
     if args.dry_run:
         print("Dry run - no files will be modified")
         print()
         
-        with open(input_file, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        content = remove_badges(content)
-        content = convert_github_alerts(content)
-        sections = parse_sections(content)
+        cleaned_content = remove_badges(content)
+        cleaned_content = convert_github_alerts(cleaned_content)
+        sections = parse_sections(cleaned_content)
         
         print(f"Would create the following files in {output_dir}:")
         print(f"  - SKILL.md")
@@ -565,7 +664,7 @@ def main():
         return 0
     
     process_readme(
-        input_file=input_file,
+        content=content,
         output_dir=output_dir,
         skill_name=skill_name,
         skill_description=args.skill_description,
