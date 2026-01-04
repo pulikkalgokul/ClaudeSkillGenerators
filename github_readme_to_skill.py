@@ -164,29 +164,73 @@ def extract_title_and_description(content: str) -> tuple[str, str]:
     title = ""
     description = ""
     found_title = False
-    
+
     for i, line in enumerate(lines):
         stripped = line.strip()
-        
+
         if not stripped:
             continue
-        
+
         if stripped.startswith("![") or stripped.startswith("[!["):
             continue
-        
+
         if stripped.startswith("# ") and not found_title:
             title = stripped[2:].strip()
             found_title = True
             continue
-        
+
         if found_title and not stripped.startswith("#"):
             if not stripped.startswith("-") and not stripped.startswith("["):
                 if not stripped.startswith(">") and not stripped.startswith("|"):
                     if len(stripped) > 20:
                         description = stripped
                         break
-    
+
     return title, description
+
+
+def generate_skill_description(title: str, description: str, skill_name: str) -> str:
+    """
+    Generate a skill description following best practices.
+
+    Best practices:
+    - Must be in third person
+    - Should include what the skill does AND when to use it
+    - Should be specific and include key terms
+    - Maximum 1024 characters
+    """
+    if description:
+        # Clean the description and ensure it's in third person
+        desc = description.strip()
+
+        # Remove common first-person phrases
+        desc = re.sub(r"^(This is |This project is |We provide |I provide )", "", desc, flags=re.IGNORECASE)
+
+        # Ensure it starts with a verb or noun (third person)
+        # Common patterns: "A tool for...", "Provides...", "Enables...", "Helps..."
+        if not re.match(r"^(A |An |Provides|Enables|Helps|Offers|Supports|Contains|Includes)", desc, re.IGNORECASE):
+            if title:
+                desc = f"Provides {desc}"
+
+        # Extract key terms from skill name for "when to use" context
+        key_terms = skill_name.replace("-", " ").replace("_", " ")
+
+        # Add "when to use" context if not already present
+        if "use when" not in desc.lower() and "use for" not in desc.lower():
+            desc = f"{desc}. Use when working with {key_terms} or when the user mentions {key_terms}"
+    else:
+        # Generate a description from the skill name and title
+        key_terms = skill_name.replace("-", " ").replace("_", " ")
+        if title:
+            desc = f"Provides documentation and guidance for {title}. Use when the user asks about {key_terms} or related topics"
+        else:
+            desc = f"Provides documentation and guidance for {key_terms}. Use when the user mentions {key_terms}"
+
+    # Ensure it doesn't exceed 1024 characters (YAML frontmatter limit)
+    if len(desc) > 1024:
+        desc = desc[:1020] + "..."
+
+    return desc
 
 
 def remove_badges(content: str) -> str:
@@ -332,14 +376,16 @@ def section_to_markdown(section: Section, include_title: bool = True) -> str:
     return "\n".join(lines)
 
 
-def should_split_section(section: Section) -> bool:
-    """Determine if a section should be split into its own file."""
-    if section.level != 2:
-        return False
-    
+def should_skip_section_entirely(section: Section) -> bool:
+    """
+    Determine if a section should be excluded from SKILL.md entirely.
+
+    Following best practices: boilerplate sections like License, Contributing,
+    etc. don't help Claude perform tasks and should be excluded.
+    """
     skip_sections = {
         "license",
-        "contributing", 
+        "contributing",
         "acknowledgments",
         "acknowledgements",
         "credits",
@@ -348,16 +394,29 @@ def should_split_section(section: Section) -> bool:
         "table of contents",
         "contents",
         "toc",
+        "badges",
+        "build status",
+        "ci",
+        "continuous integration",
     }
-    
-    if section.anchor in skip_sections or section.title.lower() in skip_sections:
+
+    return section.anchor in skip_sections or section.title.lower() in skip_sections
+
+
+def should_split_section(section: Section, min_section_length: int = 200) -> bool:
+    """Determine if a section should be split into its own file."""
+    if section.level != 2:
         return False
-    
+
+    # Skip boilerplate sections entirely
+    if should_skip_section_entirely(section):
+        return False
+
     content_length = len(section.content) + sum(
         len(section_to_markdown(s)) for s in section.subsections
     )
-    
-    return content_length > 200
+
+    return content_length > min_section_length
 
 
 def clean_section_content(content: str) -> str:
@@ -373,6 +432,49 @@ def generate_section_filename(section: Section) -> str:
     """Generate a filename for a section."""
     name = slugify(section.title)
     return f"{name}.md"
+
+
+def add_table_of_contents(content: str, section: Section) -> str:
+    """
+    Add table of contents for files longer than 100 lines.
+
+    Following best practices: reference files longer than 100 lines
+    should include a table of contents at the top.
+    """
+    lines = content.split("\n")
+    if len(lines) < 100:
+        return content
+
+    # Generate TOC from subsections
+    if not section.subsections:
+        return content
+
+    toc_lines = ["## Contents\n"]
+    for subsection in section.subsections:
+        # Create anchor links for subsections
+        anchor = slugify(subsection.title)
+        toc_lines.append(f"- [{subsection.title}](#{anchor})")
+
+    toc_lines.append("\n---\n")
+
+    # Insert TOC after the main title
+    content_lines = content.split("\n")
+    result = []
+
+    # Find the first heading and add TOC after it
+    title_found = False
+    for i, line in enumerate(content_lines):
+        result.append(line)
+        if not title_found and line.startswith("#"):
+            title_found = True
+            result.append("")
+            result.extend(toc_lines)
+
+    if not title_found:
+        # If no title found, prepend TOC
+        return "\n".join(toc_lines) + "\n" + content
+
+    return "\n".join(result)
 
 
 def process_readme(
@@ -397,10 +499,10 @@ def process_readme(
     
     title, description = extract_title_and_description(content)
     if not skill_description:
-        skill_description = description or f"Documentation for {skill_name}"
-    
+        skill_description = generate_skill_description(title, description, skill_name)
+
     print(f"Title: {title}")
-    print(f"Description: {skill_description[:80]}...")
+    print(f"Description: {skill_description[:100]}..." if len(skill_description) > 100 else f"Description: {skill_description}")
     print()
     
     sections = parse_sections(content)
@@ -419,23 +521,30 @@ def process_readme(
         for section in sections:
             if section.level == 1:
                 continue
-            
-            if should_split_section(section):
+
+            # Skip boilerplate sections entirely
+            if should_skip_section_entirely(section):
+                continue
+
+            if should_split_section(section, min_section_length):
                 filename = generate_section_filename(section)
                 section_files[section.anchor] = filename
                 created_files.append((filename, section.title, section))
     
     print("Processing sections...")
-    
+
     for filename, section_title, section in created_files:
         section_content = section_to_markdown(section, include_title=True)
         section_content = clean_section_content(section_content)
         section_content = convert_relative_links(section_content, section_files)
-        
+
+        # Add table of contents for files longer than 100 lines (best practice)
+        section_content = add_table_of_contents(section_content, section)
+
         output_path = output_dir / filename
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(section_content + "\n")
-        
+
         print(f"  Created: {filename}")
     
     generate_skill_md(
@@ -478,14 +587,25 @@ def generate_skill_md(
     if skill_description:
         lines.append(skill_description)
         lines.append("")
-    
-    lines.append("## Documentation Structure")
-    lines.append("")
-    
+
+    # Only add heading if there are sections to show
+    has_sections = any(
+        section.level != 1 and not should_skip_section_entirely(section)
+        for section in sections
+    )
+
+    if has_sections:
+        lines.append("## Available Documentation")
+        lines.append("")
+
     for section in sections:
         if section.level == 1:
             continue
-        
+
+        # Skip boilerplate sections entirely (following best practices)
+        if should_skip_section_entirely(section):
+            continue
+
         if section.anchor in section_files:
             filename = section_files[section.anchor]
             short_desc = extract_section_summary(section)
@@ -495,19 +615,22 @@ def generate_skill_md(
                 lines.append(f"- **{section.title}** ([{filename}]({filename}))")
         else:
             lines.append(f"- **{section.title}**")
-        
+
         for subsection in section.subsections:
             if subsection.anchor in section_files:
                 filename = section_files[subsection.anchor]
                 lines.append(f"  - [{subsection.title}]({filename})")
             else:
                 lines.append(f"  - {subsection.title}")
-    
+
     lines.append("")
-    
+
     inline_sections = []
     for section in sections:
         if section.level == 1:
+            continue
+        # Skip boilerplate sections entirely
+        if should_skip_section_entirely(section):
             continue
         if section.anchor not in section_files:
             inline_sections.append(section)
@@ -515,27 +638,24 @@ def generate_skill_md(
     if inline_sections:
         lines.append("## Quick Reference")
         lines.append("")
-        
+
         for section in inline_sections:
             section_md = section_to_markdown(section, include_title=True)
             section_md = clean_section_content(section_md)
             lines.append(section_md)
             lines.append("")
     
-    lines.extend([
-        "## Usage Notes",
-        "",
-        "- Start with the main documentation sections for an overview",
-        "- Refer to specific sections for detailed information on each topic",
-        "- Code examples are provided throughout the documentation",
-        "",
-    ])
-    
     skill_md_path = output_dir / "SKILL.md"
     with open(skill_md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    
+
     print(f"  Created: SKILL.md")
+
+    # Check SKILL.md size and warn if it exceeds best practice recommendation
+    if len(lines) > 500:
+        print(f"\n⚠️  Warning: SKILL.md has {len(lines)} lines (recommended: <500)")
+        print("   Consider using --min-section-length with a lower value to split more sections")
+        print("   Best practice: Keep SKILL.md under 500 lines for optimal performance")
 
 
 def extract_section_summary(section: Section) -> str:
@@ -651,16 +771,23 @@ def main():
     if args.dry_run:
         print("Dry run - no files will be modified")
         print()
-        
+
         cleaned_content = remove_badges(content)
         cleaned_content = convert_github_alerts(cleaned_content)
         sections = parse_sections(cleaned_content)
-        
+
         print(f"Would create the following files in {output_dir}:")
         print(f"  - SKILL.md")
         for section in sections:
-            if section.level == 2 and should_split_section(section):
+            if section.level == 2 and not should_skip_section_entirely(section) and should_split_section(section, args.min_section_length):
                 print(f"  - {generate_section_filename(section)}")
+
+        skipped = [s for s in sections if should_skip_section_entirely(s)]
+        if skipped:
+            print(f"\nBoilerplate sections that will be skipped:")
+            for section in skipped:
+                print(f"  - {section.title}")
+
         return 0
     
     process_readme(

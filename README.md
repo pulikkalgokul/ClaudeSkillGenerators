@@ -152,6 +152,32 @@ Please refer to the original [agent-skills repository](https://github.com/noname
 
 The GitHub README converter (`github_readme_to_skill.py`) is an extension/modification built upon concepts from the original repository.
 
+## Testing
+
+This project includes a comprehensive test suite to ensure all features work correctly.
+
+### Running Tests
+
+```bash
+# Run all tests
+python3 test_github_readme_to_skill.py
+
+# Run with verbose output
+python3 test_github_readme_to_skill.py -v
+```
+
+### Test Coverage
+
+The test suite includes **37 tests** covering:
+- Description generation with third-person voice and "when to use" context
+- Boilerplate section filtering (License, Contributing, etc.)
+- Table of contents generation for long files
+- SKILL.md size warnings
+- GitHub alert conversions
+- Badge removal
+
+See [TESTING.md](TESTING.md) for detailed testing documentation.
+
 ## Troubleshooting
 
 ### Common Issues
@@ -166,6 +192,7 @@ If you encounter issues:
 1. Check the error message for specific guidance
 2. Try running with `--dry-run` to preview what would happen
 3. Verify your Python version is 3.7 or higher
+4. Run the test suite to verify your installation: `python3 test_github_readme_to_skill.py`
 
 ## Acknowledgments
 
